@@ -1,0 +1,513 @@
+// Embuni ELC — Prisma schema
+// University of Embu Equity Leaders Chapter — Digital Management System
+//
+// Architecture note: SQLite for sandbox/development. The schema is designed
+// to be portable to PostgreSQL or MySQL for production deployment on a VPS.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// AUTHENTICATION & IDENTITY
+// ============================================================================
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  // Account status lifecycle: pending → active → (suspended | deactivated)
+  status        String   @default("pending") // pending | active | suspended | deactivated
+  emailVerified DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  archivedAt    DateTime? // soft archival per §33.2
+
+  profile       Profile?
+  userRoles     UserRole[]
+  notifications Notification[]
+  auditLogs     AuditLog[]  // actor side
+  createdAuditLogs AuditLog[] @relation("AuditLogCreatedBy")
+  registrations EventRegistration[]
+  attendance    Attendance[]
+  newsArticles  NewsArticle[] // author
+  announcements Announcement[] // author
+  mentorshipSessions MentorshipSession[] // mentor
+  mentorshipSessionsMentee MentorshipSession[] @relation("MentorshipMentee") // mentee
+  mentorshipAssignmentsMentor MentorshipAssignment[] @relation("MentorshipMentor") // mentor
+  mentorshipAssignmentsMentee MentorshipAssignment[] @relation("MentorshipMentee") // mentee
+  alumniProfile Alumni?
+  concerns      Concern[] // submittedBy
+  concernsAssigned Concern[] @relation("ConcernAssignee") // assignedTo
+  financialRecords FinancialRecord[] // recordedBy
+  passwordResetTokens PasswordResetToken[]
+  sentMessages     Message[] @relation("MessageSender")
+  receivedMessages Message[] @relation("MessageRecipient")
+
+  @@index([status])
+  @@index([email])
+}
+
+model Profile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName           String
+  preferredName      String?
+  gender             String? // male | female | other
+  yearOfStudy        Int?     // 1 | 2 | 3 | 4 | 5
+  registrationNumber String?  // University of Embu registration number
+  school             String?  // e.g. "School of Business"
+  program            String?  // e.g. "BSc Computer Science"
+  phone              String?  // +254...
+  bio                String?
+  avatarUrl          String?
+  joinedAt           DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([gender, yearOfStudy])
+  @@index([registrationNumber])
+}
+
+// ============================================================================
+// RBAC — Roles & Permissions
+// ============================================================================
+
+model Role {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. PRESIDENT, MALE_Y1_REP, LEADER, SUPER_ADMIN
+  name        String   // human-friendly label
+  description String?
+  category    String   @default("leader") // leader | executive | year_rep | admin
+  isExecutive Boolean  @default(false)
+  isSystem    Boolean  @default(false) // cannot be deleted (Super Admin, Leader)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. "leaders.view", "leaders.view.male_y1"
+  name        String
+  description String?
+  module      String   // leaders | programs | events | news | finance | etc.
+  action      String   // view | create | update | delete | manage | approve
+  scope       String?  // own | all | male_y1 | female_y1 | female_y1_readonly | finance | etc.
+  createdAt    DateTime @default(now())
+
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  id           String @id @default(cuid())
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+}
+
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String
+  roleId    String
+  // Optional delegation scope — e.g. for Asst Female Y1 Rep or delegated VP
+  scopeNote String?
+  createdAt DateTime @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+// ============================================================================
+// PROGRAMS, EVENTS, ATTENDANCE
+// ============================================================================
+
+model Program {
+  id          String   @id @default(cuid())
+  title       String
+  slug        String   @unique
+  summary     String
+  description String
+  category    String?  // mentorship | leadership | community | career | academic
+  coverUrl    String?
+  status      String   @default("draft") // draft | published | archived
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  archivedAt  DateTime?
+
+  events      Event[]
+
+  @@index([status])
+  @@index([category])
+}
+
+model Event {
+  id            String   @id @default(cuid())
+  title         String
+  slug          String   @unique
+  summary       String
+  description   String
+  category      String?  // workshop | seminar | outreach | social | meeting
+  coverUrl      String?
+  venue         String?
+  location      String?
+  startAt       DateTime
+  endAt         DateTime?
+  status        String   @default("draft") // draft | published | ongoing | completed | cancelled | archived
+  publishedAt   DateTime?
+  programId     String?
+  capacity      Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  archivedAt    DateTime?
+
+  program       Program?           @relation(fields: [programId], references: [id], onDelete: SetNull)
+  registrations EventRegistration[]
+  attendance    Attendance[]
+
+  @@index([status])
+  @@index([startAt])
+  @@index([programId])
+}
+
+model EventRegistration {
+  id        String   @id @default(cuid())
+  eventId   String
+  userId    String
+  status    String   @default("registered") // registered | cancelled | attended | absent
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user      User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+  @@index([userId])
+}
+
+model Attendance {
+  id        String   @id @default(cuid())
+  eventId   String
+  userId    String
+  status    String   @default("present") // present | absent | late | excused
+  recordedAt DateTime @default(now())
+  note      String?
+
+  event     Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user      User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+  @@index([userId])
+}
+
+// ============================================================================
+// NEWS & ANNOUNCEMENTS
+// ============================================================================
+
+model NewsArticle {
+  id          String   @id @default(cuid())
+  title       String
+  slug        String   @unique
+  summary     String
+  body        String
+  category    String?  // announcement | update | story | event_recap | minute
+  coverUrl    String?
+  status      String   @default("draft") // draft | published | archived
+  publishedAt DateTime?
+  authorId    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  archivedAt  DateTime?
+
+  author      User? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([publishedAt])
+}
+
+model Announcement {
+  id          String   @id @default(cuid())
+  title       String
+  body        String
+  audience    String   @default("all") // all | leaders | executive | year1 | male_y1 | female_y1
+  status      String   @default("draft") // draft | published | archived
+  publishedAt DateTime?
+  authorId    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  author      User? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([audience])
+}
+
+// ============================================================================
+// GALLERY & RESOURCES
+// ============================================================================
+
+model GalleryMedia {
+  id          String   @id @default(cuid())
+  title       String
+  caption     String?
+  imageUrl    String
+  album       String?  // grouping for multi-image sets
+  eventId     String?  // link to event if applicable (denormalized; no FK for resilience)
+  status      String   @default("published") // draft | published | archived
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([album])
+}
+
+model Resource {
+  id          String   @id @default(cuid())
+  title       String
+  slug        String   @unique
+  description String?
+  category    String?  // document | template | policy | form | guide
+  fileUrl     String?  // link or path
+  externalUrl String?  // for resources that are external links
+  visibility  String   @default("public") // public | leaders | executive
+  status      String   @default("published") // draft | published | archived
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([visibility])
+}
+
+// ============================================================================
+// MENTORSHIP & ALUMNI
+// ============================================================================
+
+// A mentorship pairing: a mentor (User) is assigned a mentee (User) within
+// a mentorship program (Program with category="mentorship" or a standalone
+// MentorshipProgram). Tracks status and session history.
+model MentorshipAssignment {
+  id          String   @id @default(cuid())
+  mentorId    String
+  menteeId    String
+  programId   String?  // optional link to a Program
+  status      String   @default("active") // active | completed | paused | cancelled
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  mentor      User @relation("MentorshipMentor", fields: [mentorId], references: [id], onDelete: Cascade)
+  mentee      User @relation("MentorshipMentee", fields: [menteeId], references: [id], onDelete: Cascade)
+  sessions    MentorshipSession[]
+
+  @@unique([mentorId, menteeId, programId])
+  @@index([mentorId])
+  @@index([menteeId])
+  @@index([status])
+}
+
+model MentorshipSession {
+  id            String   @id @default(cuid())
+  assignmentId  String?
+  mentorId      String
+  menteeId      String?
+  title         String
+  notes         String?
+  heldAt        DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assignment    MentorshipAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  mentor        User @relation(fields: [mentorId], references: [id], onDelete: Cascade)
+  mentee        User? @relation("MentorshipMentee", fields: [menteeId], references: [id], onDelete: SetNull)
+
+  @@index([mentorId])
+  @@index([menteeId])
+  @@index([assignmentId])
+  @@index([heldAt])
+}
+
+// Alumni records — former chapter leaders who have graduated.
+// Linked to a User if they have an account; otherwise standalone.
+model Alumni {
+  id              String   @id @default(cuid())
+  userId          String?  @unique // linked user account (if they still have one)
+  fullName        String
+  email           String
+  phone           String?
+  graduationYear  Int
+  formerRole       String?  // e.g. "President (2023-2024)"
+  school          String?
+  program         String?  // academic programme
+  currentOccupation String?
+  company         String?
+  linkedinUrl     String?
+  bio             String?
+  avatarUrl       String?
+  engagementLevel String   @default("passive") // active | passive | mentor | uncontactable
+  status          String   @default("active") // active | archived
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([graduationYear])
+  @@index([engagementLevel])
+  @@index([status])
+}
+
+// Year-1 Rep concerns & feedback (Male/Female Y1 Rep → Executive)
+model Concern {
+  id          String   @id @default(cuid())
+  title       String
+  body        String
+  cohort      String   // male_y1 | female_y1
+  status      String   @default("open") // open | acknowledged | resolved | closed
+  submittedById String
+  assignedToId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  submittedBy User  @relation(fields: [submittedById], references: [id], onDelete: Cascade)
+  assignedTo User?  @relation("ConcernAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([cohort, status])
+  @@index([submittedById])
+}
+
+// ============================================================================
+// FINANCE & TREASURY
+// ============================================================================
+
+model FinancialRecord {
+  id          String   @id @default(cuid())
+  type        String   // income | expenditure
+  category    String?  // donations | membership | events | supplies | transport | other
+  amount      Float
+  currency    String   @default("KES")
+  description String
+  date        DateTime
+  reference   String?  // receipt number, M-Pesa code, etc.
+  recordedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  recordedBy User? @relation(fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@index([type, date])
+  @@index([category])
+  @@index([date])
+}
+
+model Budget {
+  id          String   @id @default(cuid())
+  title       String
+  fiscalYear  String   // e.g. "2026"
+  quarter     String?  // Q1 | Q2 | Q3 | Q4
+  category    String?
+  plannedIncome Float   @default(0)
+  plannedExpenditure Float @default(0)
+  notes       String?
+  status      String   @default("draft") // draft | approved | archived
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([fiscalYear])
+  @@index([status])
+}
+
+// ============================================================================
+// NOTIFICATIONS & AUDIT
+// ============================================================================
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // event_reminder | announcement | system | concern_update | role_change
+  title     String
+  body      String?
+  link      String?  // relative URL to the relevant resource
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?  // who performed the action
+  action    String   // e.g. "user.create", "role.assign", "news.publish", "user.suspend"
+  target    String?  // entity type + id, e.g. "user:abc123"
+  context   String?  // additional JSON-serialized context (no secrets)
+  ip        String?
+  createdAt DateTime @default(now())
+
+  actor     User?  @relation(fields: [actorId], references: [id], onDelete: SetNull, map: "AuditLog_actor_fkey")
+  createdBy User?  @relation("AuditLogCreatedBy", fields: [actorId], references: [id], onDelete: SetNull, map: "AuditLog_createdBy_fkey")
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// Password reset tokens — created by the forgot-password flow.
+// A token is single-use and expires after 1 hour.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+}
+
+// ============================================================================
+// DIRECT MESSAGING — targeted communication between users
+// ============================================================================
+
+// Direct messages between users (targeted communication).
+// Complements the Announcements module (one-to-many broadcast) with
+// one-to-one role-to-role / user-to-user messaging — e.g. President →
+// executive team, Mentorship Coordinator → mentor, Year-1 Rep → executive.
+model Message {
+  id          String   @id @default(cuid())
+  senderId    String
+  recipientId String
+  subject     String
+  body        String
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  sender      User  @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   User  @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([recipientId, read])
+  @@index([createdAt])
+}
