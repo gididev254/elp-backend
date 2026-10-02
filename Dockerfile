@@ -15,6 +15,7 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN bunx prisma generate --schema=prisma/schema.prisma
 RUN bun run build || true  # TypeScript build (may have type errors in dev)
 
 # Stage 3: Production
